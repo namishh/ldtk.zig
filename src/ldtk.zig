@@ -110,6 +110,21 @@ pub const IntRect = Rect(i32);
 pub const UIntRect = Rect(u32);
 pub const FloatRect = Rect(f32);
 
+pub const Dir = enum {
+    None,
+    North,
+    NorthEast,
+    East,
+    SouthEast,
+    South,
+    SouthWest,
+    West,
+    NorthWest,
+    Overlap,
+    Over,
+    Under,
+};
+
 pub const FilePath = struct {
     path: []const u8,
 
@@ -408,8 +423,411 @@ fn parseLayerType(type_str: []const u8) LayerType {
     return LayerType.IntGrid;
 }
 
-// ::Project
-pub const Project = struct {
+// ::Tile
+pub const Tile = struct {
+    tile_id: i32,
+    position: IntPoint,
+    flips: u8,
+    pub fn init(id: i32, pos: IntPoint, flips: u8) Tile {
+        return Tile{
+            .tile_id = id,
+            .position = pos,
+            .flips = flips,
+        };
+    }
+    pub fn initWithFlips(id: i32, pos: IntPoint, flip_flags: u8) Tile {
+        return Tile{
+            .tile_id = id,
+            .position = pos,
+            .flips = flip_flags,
+        };
+    }
+
+    pub fn getTexture(self: Tile, tileset: *const Tileset) IntRect {
+        return tileset.getTexRect(self.tile_id);
+    }
+};
+
+// ::Entity
+pub const Entity = struct {
+    fields_container: FieldsContainer,
+    def: *const EntityDef,
+    iid: IID,
+    position: IntPoint,
+    size: IntPoint,
+    pivot: FloatPoint,
+
+    pub fn init(allocator: std.mem.Allocator, entity_def: *const EntityDef, instance_iid: IID) Entity {
+        return Entity{
+            .fields_container = FieldsContainer.init(allocator),
+            .def = entity_def,
+            .iid = instance_iid,
+            .position = IntPoint.initZero(),
+            .size = entity_def.size,
+            .pivot = FloatPoint.init(0.5, 1.0),
+        };
+    }
+
+    pub fn deinit(self: *Entity, allocator: std.mem.Allocator) void {
+        self.fields_container.deinit(allocator);
+        allocator.free(self.iid);
+    }
+
+    pub fn getName(self: Entity) []const u8 {
+        return self.def.identifier;
+    }
+
+    pub fn getUid(self: Entity) i32 {
+        return self.def.uid;
+    }
+
+    pub fn getField(self: Entity, name: []const u8) ?Field {
+        return self.fields_container.getField(name);
+    }
+
+    pub fn hasField(self: Entity, name: []const u8) bool {
+        return self.fields_container.hasField(name);
+    }
+
+    pub fn allFields(self: Entity) std.HashMap([]const u8, Field, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).Iterator {
+        return self.fields_container.allFields();
+    }
+};
+
+// ::Layer
+pub const Layer = struct {
+    fields_container: FieldsContainer,
+    def: *const LayerDef,
+    iid: IID,
+    level: *const Level,
+    c_width: i32,
+    c_height: i32,
+    grid_size: i32,
+    px_total_offset: IntPoint,
+    opacity: f32,
+    visible: bool,
+    intgrid: std.ArrayList(IntGridValue),
+    entities: std.ArrayList(Entity),
+    tiles: std.ArrayList(Tile),
+    auto_tiles: std.ArrayList(Tile),
+
+    pub fn init(allocator: std.mem.Allocator, layer_def: *const LayerDef, instance_iid: IID, parent_level: *const Level) Layer {
+        return Layer{
+            .fields_container = FieldsContainer.init(allocator),
+            .def = layer_def,
+            .iid = instance_iid,
+            .level = parent_level,
+            .c_width = 0,
+            .c_height = 0,
+            .grid_size = layer_def.grid_size,
+            .px_total_offset = IntPoint.initZero(),
+            .opacity = layer_def.opacity,
+            .visible = true,
+            .intgrid = std.ArrayList(IntGridValue).init(allocator),
+            .entities = std.ArrayList(Entity).init(allocator),
+            .tiles = std.ArrayList(Tile).init(allocator),
+            .auto_tiles = std.ArrayList(Tile).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Layer, allocator: std.mem.Allocator) void {
+        self.fields_container.deinit(allocator);
+        allocator.free(self.iid);
+        self.intgrid.deinit();
+        for (self.entities.items) |*entity| {
+            entity.deinit(allocator);
+        }
+        self.entities.deinit();
+        self.tiles.deinit();
+        self.auto_tiles.deinit();
+    }
+
+    pub fn getName(self: Layer) []const u8 {
+        return self.def.identifier;
+    }
+
+    pub fn getType(self: Layer) LayerType {
+        return self.def.layer_type;
+    }
+
+    pub fn getUid(self: Layer) i32 {
+        return self.def.uid;
+    }
+
+    pub fn hasIntGridValueAt(self: Layer, cx: i32, cy: i32) bool {
+        const index = @as(usize, @intCast(cy * self.c_width + cx));
+        return index < self.intgrid.items.len and self.intgrid.items[index].value != 0;
+    }
+
+    pub fn getIntGridValueAt(self: Layer, cx: i32, cy: i32) IntGridValue {
+        const index = @as(usize, @intCast(cy * self.c_width + cx));
+        if (index < self.intgrid.items.len) {
+            return self.intgrid.items[index];
+        }
+        return IntGridValue.NONE;
+    }
+
+    pub fn allEntities(self: Layer) []Entity {
+        return self.entities.items;
+    }
+
+    pub fn getEntity(self: Layer, name: []const u8) ?*Entity {
+        for (self.entities.items) |*entity| {
+            if (std.mem.eql(u8, entity.getName(), name)) {
+                return entity;
+            }
+        }
+        return null;
+    }
+
+    pub fn getEntitiesByName(self: Layer, allocator: std.mem.Allocator, name: []const u8) !std.ArrayList(*Entity) {
+        var result = std.ArrayList(*Entity).init(allocator);
+        for (self.entities.items) |*entity| {
+            if (std.mem.eql(u8, entity.getName(), name)) {
+                try result.append(entity);
+            }
+        }
+        return result;
+    }
+
+    pub fn allTiles(self: Layer) []Tile {
+        return self.tiles.items;
+    }
+
+    pub fn allAutoTiles(self: Layer) []Tile {
+        return self.auto_tiles.items;
+    }
+
+    pub fn getField(self: Layer, name: []const u8) ?Field {
+        return self.fields_container.getField(name);
+    }
+
+    pub fn hasField(self: Layer, name: []const u8) bool {
+        return self.fields_container.hasField(name);
+    }
+
+    pub fn allFields(self: Layer) std.HashMap([]const u8, Field, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).Iterator {
+        return self.fields_container.allFields();
+    }
+};
+
+pub const BgImage = struct {
+    path: FilePath,
+    pos: IntPoint,
+    scale: FloatPoint,
+    crop: IntRect,
+
+    pub fn deinit(self: *BgImage, allocator: std.mem.Allocator) void {
+        self.path.deinit(allocator);
+    }
+};
+
+// ::LEVEL
+const World = opaque {};
+
+pub const Level = struct {
+    fields_container: FieldsContainer,
+    world: *const World,
+    name: []const u8,
+    iid: IID,
+    uid: i32,
+    size: IntPoint,
+    position: IntPoint,
+    bg_color: Color,
+    depth: i32,
+    layers: std.ArrayList(Layer),
+    bg_image: ?BgImage,
+    neighbours_iid: std.ArrayList(IID),
+    neighbours_by_dir: std.HashMap(Dir, std.ArrayList(IID), std.HashMap.AutoContext(Dir), std.hash_map.default_max_load_percentage),
+    neighbours_iid_by_dir: std.HashMap(Dir, std.ArrayList(IID), std.HashMap.AutoContext(Dir), std.hash_map.default_max_load_percentage),
+
+    pub fn init(allocator: std.mem.Allocator, parent_world: *const World, level_name: []const u8, instance_iid: IID) Level {
+        var neighbours_by_dir = std.HashMap(Dir, std.ArrayList(IID), std.HashMap.AutoContext(Dir), std.hash_map.default_max_load_percentage).init(allocator);
+        var neighbours_iid_by_dir = std.HashMap(Dir, std.ArrayList(IID), std.HashMap.AutoContext(Dir), std.hash_map.default_max_load_percentage).init(allocator);
+
+        const directions = [_]Dir{ Dir.None, Dir.North, Dir.NorthEast, Dir.East, Dir.SouthEast, Dir.South, Dir.SouthWest, Dir.West, Dir.NorthWest, Dir.Over, Dir.Under, Dir.Overlap };
+        for (directions) |dir| {
+            neighbours_by_dir.put(dir, std.ArrayList(IID).init(allocator)) catch unreachable;
+            neighbours_iid_by_dir.put(dir, std.ArrayList(IID).init(allocator)) catch unreachable;
+        }
+
+        return Level{
+            .fields_container = FieldsContainer.init(allocator),
+            .world = parent_world,
+            .name = level_name,
+            .iid = instance_iid,
+            .uid = 0,
+            .size = IntPoint.initZero(),
+            .position = IntPoint.initZero(),
+            .bg_color = Color.init(),
+            .depth = 0,
+            .layers = std.ArrayList(Layer).init(allocator),
+            .bg_image = null,
+            .neighbours_iid = std.ArrayList(IID).init(allocator),
+            .neighbours_by_dir = neighbours_by_dir,
+            .neighbours_iid_by_dir = neighbours_iid_by_dir,
+        };
+    }
+
+    pub fn deinit(self: *Level, allocator: std.mem.Allocator) void {
+        self.fields_container.deinit(allocator);
+        allocator.free(self.name);
+        allocator.free(self.iid);
+        for (self.layers.items) |*layer| {
+            layer.deinit(allocator);
+        }
+        self.layers.deinit();
+        if (self.bg_image) |*bg| {
+            bg.deinit(allocator);
+        }
+        for (self.neighbours_iid.items) |neighbour| {
+            allocator.free(neighbour);
+        }
+        self.neighbours_iid.deinit();
+
+        // Deinit direction-based neighbour maps
+        var dir_iter = self.neighbours_by_dir.iterator();
+        while (dir_iter.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.neighbours_by_dir.deinit();
+
+        var iid_dir_iter = self.neighbours_iid_by_dir.iterator();
+        while (iid_dir_iter.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.neighbours_iid_by_dir.deinit();
+    }
+
+    pub fn allLayers(self: Level) []Layer {
+        return self.layers.items;
+    }
+
+    pub fn getLayer(self: Level, layer_name: []const u8) ?*Layer {
+        for (self.layers.items) |*layer| {
+            if (std.mem.eql(u8, layer.getName(), layer_name)) {
+                return layer;
+            }
+        }
+        return null;
+    }
+
+    pub fn getLayerByIID(self: Level, layer_iid: IID) ?*Layer {
+        for (self.layers.items) |*layer| {
+            if (std.mem.eql(u8, layer.iid, layer_iid)) {
+                return layer;
+            }
+        }
+        return null;
+    }
+
+    pub fn hasBgImage(self: Level) bool {
+        return self.bg_image != null;
+    }
+
+    pub fn getBgImage(self: Level) ?BgImage {
+        return self.bg_image;
+    }
+
+    pub fn allNeighbours(self: Level) []IID {
+        return self.neighbours_iid.items;
+    }
+
+    pub fn getNeighbours(self: Level, direction: Dir) ?[]IID {
+        if (direction == Dir.None) return null;
+        if (self.neighbours_by_dir.get(direction)) |list| {
+            return list.items;
+        }
+        return null;
+    }
+
+    pub fn getNeighbourDirection(self: Level, neighbour_iid: IID) Dir {
+        var iter = self.neighbours_iid_by_dir.iterator();
+        while (iter.next()) |entry| {
+            const direction = entry.key_ptr.*;
+            for (entry.value_ptr.items) |iid| {
+                if (std.mem.eql(u8, iid, neighbour_iid)) {
+                    return direction;
+                }
+            }
+        }
+        return Dir.None;
+    }
+
+    pub fn getField(self: Level, name: []const u8) ?Field {
+        return self.fields_container.getField(name);
+    }
+
+    pub fn hasField(self: Level, name: []const u8) bool {
+        return self.fields_container.hasField(name);
+    }
+
+    pub fn allFields(self: Level) std.HashMap([]const u8, Field, std.hash_map.StringContext, std.hash_map.default_max_load_percentage).Iterator {
+        return self.fields_container.allFields();
+    }
+};
+
+// ::WOrld
+pub const WorldLayout = enum {
+    Free,
+    GridVania,
+    LinearHorizontal,
+    LinearVertical,
+};
+
+pub const WorldType = struct {
+    identifier: []const u8,
+    iid: IID,
+    layout: WorldLayout,
+    world_grid_width: i32,
+    world_grid_height: i32,
+    levels: std.ArrayList(Level),
+
+    pub fn init(allocator: std.mem.Allocator, world_name: []const u8, instance_iid: IID) WorldType {
+        return WorldType{
+            .identifier = world_name,
+            .iid = instance_iid,
+            .layout = WorldLayout.Free,
+            .world_grid_width = 256,
+            .world_grid_height = 256,
+            .levels = std.ArrayList(Level).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *WorldType, allocator: std.mem.Allocator) void {
+        allocator.free(self.identifier);
+        allocator.free(self.iid);
+        for (self.levels.items) |*level| {
+            level.deinit(allocator);
+        }
+        self.levels.deinit();
+    }
+
+    pub fn allLevels(self: WorldType) []Level {
+        return self.levels.items;
+    }
+
+    pub fn getLevel(self: WorldType, name: []const u8) ?*Level {
+        for (self.levels.items) |*level| {
+            if (std.mem.eql(u8, level.name, name)) {
+                return level;
+            }
+        }
+        return null;
+    }
+
+    pub fn getLevelByIid(self: WorldType, iid: IID) ?*Level {
+        for (self.levels.items) |*level| {
+            if (std.mem.eql(u8, level.iid, iid)) {
+                return level;
+            }
+        }
+        return null;
+    }
+};
+
+// ::LdtkProject
+pub const LdtkProject = struct {
     allocator: std.mem.Allocator,
     default_pivot: FloatPoint,
     file_path: FilePath,
@@ -421,8 +839,8 @@ pub const Project = struct {
     background_color: Color,
     json_version: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) !Project {
-        return Project{
+    pub fn init(allocator: std.mem.Allocator) !LdtkProject {
+        return LdtkProject{
             .allocator = allocator,
             .default_pivot = FloatPoint.init(0.5, 1.0),
             .default_cell_size = 16,
@@ -436,8 +854,8 @@ pub const Project = struct {
         };
     }
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, file_path: []const u8) !Project {
-        var project = try Project.init(allocator);
+    pub fn loadFromFile(allocator: std.mem.Allocator, file_path: []const u8) !LdtkProject {
+        var project = try LdtkProject.init(allocator);
         project.file_path = try FilePath.init(allocator, file_path);
 
         const file = try std.fs.cwd().openFile(file_path, .{});
@@ -452,13 +870,13 @@ pub const Project = struct {
         return project;
     }
 
-    pub fn loadFromMemory(allocator: std.mem.Allocator, json_content: []const u8) !Project {
-        var project = Project.init(allocator);
+    pub fn loadFromMemory(allocator: std.mem.Allocator, json_content: []const u8) !LdtkProject {
+        var project = LdtkProject.init(allocator);
         try project.parseJson(json_content);
         return project;
     }
 
-    fn parseJson(self: *Project, content: []const u8) !void {
+    fn parseJson(self: *LdtkProject, content: []const u8) !void {
         var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});
         defer parsed.deinit();
 
@@ -496,7 +914,7 @@ pub const Project = struct {
         }
     }
 
-    fn parseDefinitions(self: *Project, defs: std.json.ObjectMap) !void {
+    fn parseDefinitions(self: *LdtkProject, defs: std.json.ObjectMap) !void {
         if (defs.get("layers")) |layers| {
             for (layers.array.items) |layer_json| {
                 var layer_def = LayerDef.init(self.allocator);
@@ -619,7 +1037,7 @@ pub const Project = struct {
         }
     }
 
-    pub fn deinit(self: *Project) void {
+    pub fn deinit(self: *LdtkProject) void {
         self.file_path.deinit(self.allocator);
         self.allocator.free(self.json_version);
         for (self.layers_defs.items) |*layer_def| {
@@ -645,7 +1063,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    var project = try Project.loadFromFile(allocator, "level.ldtk");
+    var project = try LdtkProject.loadFromFile(allocator, "level.ldtk");
     defer project.deinit();
 
     std.debug.print("JSON Version: {s}\n", .{project.json_version});

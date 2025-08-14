@@ -364,6 +364,24 @@ pub const EntityDef = struct {
     }
 };
 
+pub const EntityRef = struct {
+    identifier: []const u8,
+    iid: IID,
+    world_iid: IID,
+    level_iid: IID,
+    layer_iid: IID,
+    def_uid: i32,
+    px: IntPoint,
+
+    pub fn deinit(self: *EntityRef, allocator: std.mem.Allocator) void {
+        allocator.free(self.identifier);
+        allocator.free(self.iid);
+        allocator.free(self.world_iid);
+        allocator.free(self.level_iid);
+        allocator.free(self.layer_iid);
+    }
+};
+
 // ::EnumDef
 pub const EnumDef = struct {
     identifier: []const u8,
@@ -638,12 +656,12 @@ pub const Level = struct {
     layers: std.ArrayList(Layer),
     bg_image: ?BgImage,
     neighbours_iid: std.ArrayList(IID),
-    neighbours_by_dir: std.HashMap(Dir, std.ArrayList(IID), std.HashMap.AutoContext(Dir), std.hash_map.default_max_load_percentage),
-    neighbours_iid_by_dir: std.HashMap(Dir, std.ArrayList(IID), std.HashMap.AutoContext(Dir), std.hash_map.default_max_load_percentage),
+    neighbours_by_dir: std.HashMap(Dir, std.ArrayList(IID), std.hash_map.AutoContext(Dir), std.hash_map.default_max_load_percentage),
+    neighbours_iid_by_dir: std.HashMap(Dir, std.ArrayList(IID), std.hash_map.AutoContext(Dir), std.hash_map.default_max_load_percentage),
 
     pub fn init(allocator: std.mem.Allocator, parent_world: *const World, level_name: []const u8, instance_iid: IID) Level {
-        var neighbours_by_dir = std.HashMap(Dir, std.ArrayList(IID), std.HashMap.AutoContext(Dir), std.hash_map.default_max_load_percentage).init(allocator);
-        var neighbours_iid_by_dir = std.HashMap(Dir, std.ArrayList(IID), std.HashMap.AutoContext(Dir), std.hash_map.default_max_load_percentage).init(allocator);
+        var neighbours_by_dir = std.HashMap(Dir, std.ArrayList(IID), std.hash_map.AutoContext(Dir), std.hash_map.default_max_load_percentage).init(allocator);
+        var neighbours_iid_by_dir = std.HashMap(Dir, std.ArrayList(IID), std.hash_map.AutoContext(Dir), std.hash_map.default_max_load_percentage).init(allocator);
 
         const directions = [_]Dir{ Dir.None, Dir.North, Dir.NorthEast, Dir.East, Dir.SouthEast, Dir.South, Dir.SouthWest, Dir.West, Dir.NorthWest, Dir.Over, Dir.Under, Dir.Overlap };
         for (directions) |dir| {
@@ -838,6 +856,8 @@ pub const LdtkProject = struct {
     default_cell_size: i32,
     background_color: Color,
     json_version: []const u8,
+    worlds: std.ArrayList(WorldType),
+    toc: std.ArrayList(EntityRef),
 
     pub fn init(allocator: std.mem.Allocator) !LdtkProject {
         return LdtkProject{
@@ -848,6 +868,8 @@ pub const LdtkProject = struct {
             .tilesets = std.ArrayList(Tileset).init(allocator),
             .entities_defs = std.ArrayList(EntityDef).init(allocator),
             .enums = std.ArrayList(EnumDef).init(allocator),
+            .worlds = std.ArrayList(WorldType).init(allocator),
+            .toc = std.ArrayList(EntityRef).init(allocator),
             .file_path = FilePath{ .path = "" },
             .background_color = Color.init(),
             .json_version = "",
@@ -1056,6 +1078,15 @@ pub const LdtkProject = struct {
             enum_def.deinit(self.allocator);
         }
         self.enums.deinit();
+        for (self.worlds.items) |*world| {
+            world.deinit(self.allocator);
+        }
+        self.worlds.deinit();
+
+        for (self.toc.items) |*entity_ref| {
+            entity_ref.deinit(self.allocator);
+        }
+        self.toc.deinit();
     }
 };
 

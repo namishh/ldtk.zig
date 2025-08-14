@@ -1,0 +1,2 @@
+simple ldtk parser and loader to be used with graphics libraries.
+just copy ldtk.zig to your project

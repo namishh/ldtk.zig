@@ -3,6 +3,6 @@
 !src
 !src/ldtk.zig
 !src/main.zig
-!README.me
+!README.md
 !LICENSE
 !.gitignore

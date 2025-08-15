@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/ldtk.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });

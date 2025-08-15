@@ -441,23 +441,22 @@ fn parseLayerType(type_str: []const u8) LayerType {
     return LayerType.IntGrid;
 }
 
+fn parseWorldLayout(layout_str: []const u8) WorldLayout {
+    if (std.mem.eql(u8, layout_str, "Free")) return WorldLayout.Free;
+    if (std.mem.eql(u8, layout_str, "GridVania")) return WorldLayout.GridVania;
+    if (std.mem.eql(u8, layout_str, "LinearHorizontal")) return WorldLayout.LinearHorizontal;
+    if (std.mem.eql(u8, layout_str, "LinearVertical")) return WorldLayout.LinearVertical;
+    return WorldLayout.Free;
+}
+
 // ::Tile
 pub const Tile = struct {
     tile_id: i32,
     position: IntPoint,
-    flips: u8,
-    pub fn init(id: i32, pos: IntPoint, flips: u8) Tile {
+    pub fn init(id: i32, pos: IntPoint) Tile {
         return Tile{
             .tile_id = id,
             .position = pos,
-            .flips = flips,
-        };
-    }
-    pub fn initWithFlips(id: i32, pos: IntPoint, flip_flags: u8) Tile {
-        return Tile{
-            .tile_id = id,
-            .position = pos,
-            .flips = flip_flags,
         };
     }
 
@@ -934,6 +933,10 @@ pub const LdtkProject = struct {
         if (root.get("defs")) |defs| {
             try self.parseDefinitions(defs.object);
         }
+
+        if (root.get("worlds")) |worlds| {
+            try self.parseWorlds(worlds.array);
+        }
     }
 
     fn parseDefinitions(self: *LdtkProject, defs: std.json.ObjectMap) !void {
@@ -947,6 +950,10 @@ pub const LdtkProject = struct {
 
                 if (layer_json.object.get("uid")) |uid| {
                     layer_def.uid = @intCast(uid.integer);
+                }
+
+                if (layer_json.object.get("tilesetDefUid")) |tileset_def_uid| {
+                    layer_def.tileset_uid = @intCast(tileset_def_uid.integer);
                 }
 
                 if (layer_json.object.get("gridSize")) |grid_size| {
@@ -1059,6 +1066,188 @@ pub const LdtkProject = struct {
         }
     }
 
+    fn parseWorlds(self: *LdtkProject, worlds: std.json.Array) !void {
+        for (worlds.items) |world_json| {
+            const world_iid = try self.allocator.dupe(u8, world_json.object.get("iid").?.string);
+            const world_identifier = try self.allocator.dupe(u8, world_json.object.get("identifier").?.string);
+
+            var world = WorldType.init(self.allocator, world_identifier, world_iid);
+
+            if (world_json.object.get("worldLayout")) |layout| {
+                world.layout = parseWorldLayout(layout.string);
+            }
+
+            if (world_json.object.get("worldGridWidth")) |width| {
+                world.world_grid_width = @intCast(width.integer);
+            }
+
+            if (world_json.object.get("worldGridHeight")) |height| {
+                world.world_grid_height = @intCast(height.integer);
+            }
+
+            if (world_json.object.get("levels")) |levels| {
+                for (levels.array.items) |level_json| {
+                    try self.parseLevel(&world, level_json);
+                }
+            }
+            try self.worlds.append(world);
+        }
+    }
+
+    fn parseLevel(self: *LdtkProject, world: *WorldType, level_json: std.json.Value) !void {
+        const level_iid = try self.allocator.dupe(u8, level_json.object.get("iid").?.string);
+        const level_identifier = try self.allocator.dupe(u8, level_json.object.get("identifier").?.string);
+
+        var level = Level.init(self.allocator, @ptrCast(world), level_identifier, level_iid);
+
+        if (level_json.object.get("uid")) |uid| {
+            level.uid = @intCast(uid.integer);
+        }
+
+        if (level_json.object.get("pxWid")) |width| {
+            if (level_json.object.get("pxHei")) |height| {
+                level.size = IntPoint.init(@intCast(width.integer), @intCast(height.integer));
+            }
+        }
+
+        if (level_json.object.get("worldX")) |x| {
+            if (level_json.object.get("worldY")) |y| {
+                level.position = IntPoint.init(@intCast(x.integer), @intCast(y.integer));
+            }
+        }
+
+        if (level_json.object.get("bgColor")) |bg_color| {
+            if (bg_color != .null) {
+                level.bg_color = Color.initFromHex(bg_color.string);
+            }
+        }
+
+        if (level_json.object.get("layerInstances")) |layers| {
+            for (layers.array.items) |layer_json| {
+                try self.parseLayerInstance(&level, layer_json);
+            }
+        }
+
+        try world.levels.append(level);
+    }
+
+    fn parseLayerInstance(self: *LdtkProject, level: *Level, layer_json: std.json.Value) !void {
+        const layer_iid = try self.allocator.dupe(u8, layer_json.object.get("iid").?.string);
+
+        var layer_def: ?*const LayerDef = null;
+        if (layer_json.object.get("layerDefUid")) |uid| {
+            const layer_uid = @as(i32, @intCast(uid.integer));
+            for (self.layers_defs.items) |*def| {
+                if (def.uid == layer_uid) {
+                    layer_def = def;
+                    break;
+                }
+            }
+        }
+
+        if (layer_def == null) return;
+
+        var layer = Layer.init(self.allocator, layer_def.?, layer_iid, level);
+
+        if (layer_json.object.get("cWid")) |width| {
+            layer.c_width = @intCast(width.integer);
+        }
+
+        if (layer_json.object.get("cHei")) |height| {
+            layer.c_height = @intCast(height.integer);
+        }
+
+        if (layer_json.object.get("visible")) |visible| {
+            layer.visible = visible.bool;
+        }
+
+        if (layer_json.object.get("entityInstances")) |entities| {
+            for (entities.array.items) |entity_json| {
+                try self.parseEntityInstance(&layer, entity_json);
+            }
+        }
+
+        if (layer_json.object.get("gridTiles")) |tiles| {
+            for (tiles.array.items) |tile_json| {
+                try self.parseTileInstance(&layer, tile_json);
+            }
+        }
+
+        if (layer_json.object.get("autoLayerTiles")) |auto_tiles| {
+            for (auto_tiles.array.items) |tile_json| {
+                try self.parseAutoTileInstance(&layer, tile_json);
+            }
+        }
+
+        if (layer_json.object.get("intGridCsv")) |intgrid| {
+            try self.parseIntGrid(&layer, intgrid.array);
+        }
+
+        try level.layers.append(layer);
+    }
+
+    fn parseEntityInstance(self: *LdtkProject, layer: *Layer, entity_json: std.json.Value) !void {
+        const entity_iid = try self.allocator.dupe(u8, entity_json.object.get("iid").?.string);
+
+        var entity_def: ?*const EntityDef = null;
+        if (entity_json.object.get("defUid")) |uid| {
+            const entity_uid = @as(i32, @intCast(uid.integer));
+            for (self.entities_defs.items) |*def| {
+                if (def.uid == entity_uid) {
+                    entity_def = def;
+                    break;
+                }
+            }
+        }
+
+        if (entity_def == null) return;
+
+        var entity = Entity.init(self.allocator, entity_def.?, entity_iid);
+
+        if (entity_json.object.get("px")) |px_array| {
+            entity.position = IntPoint.init(@intCast(px_array.array.items[0].integer), @intCast(px_array.array.items[1].integer));
+        }
+
+        if (entity_json.object.get("width")) |width| {
+            if (entity_json.object.get("height")) |height| {
+                entity.size = IntPoint.init(@intCast(width.integer), @intCast(height.integer));
+            }
+        }
+
+        try layer.entities.append(entity);
+    }
+
+    fn parseTileInstance(self: *LdtkProject, layer: *Layer, tile_json: std.json.Value) !void {
+        _ = self;
+
+        if (tile_json.object.get("t")) |tile_id| {
+            if (tile_json.object.get("px")) |px_array| {
+                const tile = Tile.init(@intCast(tile_id.integer), IntPoint.init(@intCast(px_array.array.items[0].integer), @intCast(px_array.array.items[1].integer)));
+                try layer.tiles.append(tile);
+            }
+        }
+    }
+
+    fn parseAutoTileInstance(self: *LdtkProject, layer: *Layer, tile_json: std.json.Value) !void {
+        _ = self;
+
+        if (tile_json.object.get("t")) |tile_id| {
+            if (tile_json.object.get("px")) |px_array| {
+                const tile = Tile.init(@intCast(tile_id.integer), IntPoint.init(@intCast(px_array.array.items[0].integer), @intCast(px_array.array.items[1].integer)));
+                try layer.auto_tiles.append(tile);
+            }
+        }
+    }
+
+    fn parseIntGrid(self: *LdtkProject, layer: *Layer, intgrid_csv: std.json.Array) !void {
+        _ = self;
+
+        for (intgrid_csv.items) |value| {
+            const intgrid_value = IntGridValue.init(@intCast(value.integer), "", Color.init());
+            try layer.intgrid.append(intgrid_value);
+        }
+    }
+
     pub fn deinit(self: *LdtkProject) void {
         self.file_path.deinit(self.allocator);
         self.allocator.free(self.json_version);
@@ -1089,73 +1278,3 @@ pub const LdtkProject = struct {
         self.toc.deinit();
     }
 };
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    var project = try LdtkProject.loadFromFile(allocator, "level.ldtk");
-    defer project.deinit();
-
-    std.debug.print("JSON Version: {s}\n", .{project.json_version});
-    std.debug.print("Default Cell Size: {d}\n", .{project.default_cell_size});
-    std.debug.print("Default Pivot: ({d}, {d})\n", .{ project.default_pivot.x, project.default_pivot.y });
-    std.debug.print("Background Color: r={d}, g={d}, b={d}, a={d}\n\n", .{ project.background_color.r, project.background_color.g, project.background_color.b, project.background_color.a });
-
-    for (project.layers_defs.items, 0..) |layer_def, i| {
-        std.debug.print("Layer {d}:\n", .{i});
-        std.debug.print("  Identifier: {s}\n", .{layer_def.identifier});
-        std.debug.print("  UID: {d}\n", .{layer_def.uid});
-        std.debug.print("  Type: {}\n", .{layer_def.layer_type});
-        std.debug.print("  Grid Size: {d}\n", .{layer_def.grid_size});
-        std.debug.print("  Opacity: {d}\n", .{layer_def.opacity});
-        std.debug.print("  Pixel Offset: ({d}, {d})\n", .{ layer_def.px_offset.x, layer_def.px_offset.y });
-        if (layer_def.tileset_uid) |tileset_uid| {
-            std.debug.print("  Tileset UID: {d}\n", .{tileset_uid});
-        } else {
-            std.debug.print("  Tileset UID: null\n", .{});
-        }
-        std.debug.print("  IntGrid Values: {d} items\n", .{layer_def.intgrid_values.items.len});
-        for (layer_def.intgrid_values.items) |intgrid_value| {
-            std.debug.print("    Value: {d}, Name: {s}, Color: r={d}, g={d}, b={d}, a={d}\n", .{ intgrid_value.value, intgrid_value.name, intgrid_value.color.r, intgrid_value.color.g, intgrid_value.color.b, intgrid_value.color.a });
-        }
-        std.debug.print("\n", .{});
-    }
-
-    for (project.entities_defs.items, 0..) |entity_def, i| {
-        std.debug.print("Entity {d}:\n", .{i});
-        std.debug.print("  Identifier: {s}\n", .{entity_def.identifier});
-        std.debug.print("  UID: {d}\n", .{entity_def.uid});
-        std.debug.print("  Size: ({d}, {d})\n", .{ entity_def.size.x, entity_def.size.y });
-        std.debug.print("  Color: r={d}, g={d}, b={d}, a={d}\n", .{ entity_def.color.r, entity_def.color.g, entity_def.color.b, entity_def.color.a });
-        std.debug.print("  Field Definitions: {d} items\n", .{entity_def.field_defs.items.len});
-        for (entity_def.field_defs.items) |field_def| {
-            std.debug.print("    Field: {s}, Type: {}\n", .{ field_def.identifier, field_def.field_type });
-        }
-        std.debug.print("\n", .{});
-    }
-
-    for (project.tilesets.items, 0..) |tileset, i| {
-        std.debug.print("Tileset {d}:\n", .{i});
-        std.debug.print("  Identifier: {s}\n", .{tileset.identifier});
-        std.debug.print("  UID: {d}\n", .{tileset.uid});
-        std.debug.print("  Relative Path: {s}\n", .{tileset.rel_path.path});
-        std.debug.print("  Pixel Width: {d}\n", .{tileset.px_width});
-        std.debug.print("  Pixel Height: {d}\n", .{tileset.px_height});
-        std.debug.print("  Tile Grid Size: {d}\n", .{tileset.tile_grid_size});
-        std.debug.print("  Spacing: {d}\n", .{tileset.spacing});
-        std.debug.print("  Padding: {d}\n", .{tileset.padding});
-        std.debug.print("\n", .{});
-    }
-
-    for (project.enums.items, 0..) |enum_def, i| {
-        std.debug.print("Enum {d}:\n", .{i});
-        std.debug.print("  Identifier: {s}\n", .{enum_def.identifier});
-        std.debug.print("  UID: {d}\n", .{enum_def.uid});
-        std.debug.print("  Values: {d} items\n", .{enum_def.values.items.len});
-        for (enum_def.values.items) |value| {
-            std.debug.print("    {s}\n", .{value});
-        }
-        std.debug.print("\n", .{});
-    }
-}

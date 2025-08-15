@@ -1,0 +1,8 @@
+*
+!build.zig*
+!src
+!src/ldtk.zig
+!src/main.zig
+!README.me
+!LICENSE
+!.gitignore
